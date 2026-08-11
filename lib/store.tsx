@@ -6,6 +6,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useReducer,
   useState,
 } from "react"
 import type {
@@ -36,17 +37,6 @@ interface DBShape {
   sesionId: string | null
 }
 
-function seed(): DBShape {
-  return {
-    usuarios: usuariosSeed,
-    espacios: espaciosSeed,
-    reservaciones: reservacionesSeed,
-    pagos: pagosSeed,
-    notificaciones: notificacionesSeed,
-    sesionId: null,
-  }
-}
-
 type Resultado = { ok: boolean; error?: string; id?: string }
 
 interface Store {
@@ -57,14 +47,12 @@ interface Store {
   reservaciones: Reservacion[]
   pagos: Pago[]
   notificaciones: Notificacion[]
-  // auth
   registrar: (data: Omit<Usuario, "id" | "estado" | "verificacion">) => Resultado
   iniciarSesion: (correo: string, password: string) => Resultado
   cerrarSesion: () => void
   recuperar: (correo: string) => Resultado
   actualizarPerfil: (data: Pick<Usuario, "nombre" | "telefono">) => void
   enviarVerificacion: (documento: string) => void
-  // espacios
   publicarEspacio: (
     data: Omit<Espacio, "id" | "propietarioId" | "estado" | "bloqueos" | "creado">,
   ) => Resultado
@@ -72,7 +60,6 @@ interface Store {
   alternarEstadoEspacio: (id: string) => void
   bloquearFechas: (espacioId: string, inicio: string, fin: string) => Resultado
   eliminarBloqueo: (espacioId: string, bloqueoId: string) => void
-  // reservaciones
   solicitarReservacion: (
     espacioId: string,
     inicio: string,
@@ -87,14 +74,11 @@ interface Store {
   enviarIntencion: (id: string, mensaje: string) => Resultado
   solicitarComentario: (id: string) => Resultado
   enviarComentario: (id: string, comentario: string) => Resultado
-  // admin
   suspenderUsuario: (id: string) => void
   reactivarUsuario: (id: string) => void
   resolverVerificacion: (id: string, estado: EstadoVerificacion) => void
-  // notificaciones
   marcarLeida: (id: string) => void
   marcarTodasLeidas: (usuarioId: string) => void
-  // helpers
   espacioDisponible: (
     espacioId: string,
     inicio: string,
@@ -103,7 +87,73 @@ interface Store {
   ) => boolean
 }
 
+type Action =
+  | { type: "hydrate"; payload: DBShape }
+  | { type: "registrar"; payload: { usuario: Usuario } }
+  | { type: "iniciarSesion"; payload: { sesionId: string } }
+  | { type: "cerrarSesion" }
+  | {
+      type: "actualizarPerfil"
+      payload: { sesionId: string; data: Pick<Usuario, "nombre" | "telefono"> }
+    }
+  | {
+      type: "enviarVerificacion"
+      payload: { sesionId: string; documento: string }
+    }
+  | { type: "publicarEspacio"; payload: { espacio: Espacio } }
+  | { type: "actualizarEspacio"; payload: { id: string; data: Partial<Espacio> } }
+  | { type: "alternarEstadoEspacio"; payload: { id: string } }
+  | {
+      type: "bloquearFechas"
+      payload: { espacioId: string; bloqueo: Espacio["bloqueos"][number] }
+    }
+  | {
+      type: "eliminarBloqueo"
+      payload: { espacioId: string; bloqueoId: string }
+    }
+  | {
+      type: "solicitarReservacion"
+      payload: { reservacion: Reservacion; notificacion: Notificacion }
+    }
+  | {
+      type: "cambiarEstadoReservacion"
+      payload: { id: string; estado: Reservacion["estado"]; notificaciones: Notificacion[] }
+    }
+  | {
+      type: "pagarReservacion"
+      payload: { id: string; pago: Pago; notificacion: Notificacion }
+    }
+  | {
+      type: "solicitarIntencion"
+      payload: { id: string; notificacion: Notificacion }
+    }
+  | { type: "enviarIntencion"; payload: { id: string; mensaje: string } }
+  | {
+      type: "solicitarComentario"
+      payload: { id: string; notificacion: Notificacion }
+    }
+  | { type: "enviarComentario"; payload: { id: string; comentario: string } }
+  | { type: "suspenderUsuario"; payload: { id: string } }
+  | { type: "reactivarUsuario"; payload: { id: string } }
+  | {
+      type: "resolverVerificacion"
+      payload: { id: string; estado: EstadoVerificacion; notificacion: Notificacion }
+    }
+  | { type: "marcarLeida"; payload: { id: string } }
+  | { type: "marcarTodasLeidas"; payload: { usuarioId: string } }
+
 const StoreContext = createContext<Store | null>(null)
+
+function seed(): DBShape {
+  return {
+    usuarios: usuariosSeed,
+    espacios: espaciosSeed,
+    reservaciones: reservacionesSeed,
+    pagos: pagosSeed,
+    notificaciones: notificacionesSeed,
+    sesionId: null,
+  }
+}
 
 function uid(prefix: string) {
   return `${prefix}-${Date.now().toString(36)}-${Math.random()
@@ -113,6 +163,198 @@ function uid(prefix: string) {
 
 function hoy() {
   return new Date().toISOString().slice(0, 10)
+}
+
+function readStorage() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (!raw) return null
+    return JSON.parse(raw) as DBShape
+  } catch {
+    return null
+  }
+}
+
+function writeStorage(db: DBShape) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(db))
+  } catch {
+    // ignore persistence failures
+  }
+}
+
+function reducer(state: DBShape, action: Action): DBShape {
+  switch (action.type) {
+    case "hydrate":
+      return action.payload
+    case "registrar":
+      return {
+        ...state,
+        usuarios: [...state.usuarios, action.payload.usuario],
+        sesionId: action.payload.usuario.id,
+      }
+    case "iniciarSesion":
+      return { ...state, sesionId: action.payload.sesionId }
+    case "cerrarSesion":
+      return { ...state, sesionId: null }
+    case "actualizarPerfil":
+      return {
+        ...state,
+        usuarios: state.usuarios.map((u) =>
+          u.id === action.payload.sesionId ? { ...u, ...action.payload.data } : u,
+        ),
+      }
+    case "enviarVerificacion":
+      return {
+        ...state,
+        usuarios: state.usuarios.map((u) =>
+          u.id === action.payload.sesionId
+            ? {
+                ...u,
+                verificacion: "pendiente" as EstadoVerificacion,
+                documento: action.payload.documento,
+              }
+            : u,
+        ),
+      }
+    case "publicarEspacio":
+      return {
+        ...state,
+        espacios: [...state.espacios, action.payload.espacio],
+      }
+    case "actualizarEspacio":
+      return {
+        ...state,
+        espacios: state.espacios.map((e) =>
+          e.id === action.payload.id ? { ...e, ...action.payload.data } : e,
+        ),
+      }
+    case "alternarEstadoEspacio":
+      return {
+        ...state,
+        espacios: state.espacios.map((e) =>
+          e.id === action.payload.id
+            ? { ...e, estado: e.estado === "activo" ? "inactivo" : "activo" }
+            : e,
+        ),
+      }
+    case "bloquearFechas":
+      return {
+        ...state,
+        espacios: state.espacios.map((e) =>
+          e.id === action.payload.espacioId
+            ? { ...e, bloqueos: [...e.bloqueos, action.payload.bloqueo] }
+            : e,
+        ),
+      }
+    case "eliminarBloqueo":
+      return {
+        ...state,
+        espacios: state.espacios.map((e) =>
+          e.id === action.payload.espacioId
+            ? {
+                ...e,
+                bloqueos: e.bloqueos.filter((b) => b.id !== action.payload.bloqueoId),
+              }
+            : e,
+        ),
+      }
+    case "solicitarReservacion":
+      return {
+        ...state,
+        reservaciones: [...state.reservaciones, action.payload.reservacion],
+        notificaciones: [action.payload.notificacion, ...state.notificaciones],
+      }
+    case "cambiarEstadoReservacion":
+      return {
+        ...state,
+        reservaciones: state.reservaciones.map((r) =>
+          r.id === action.payload.id ? { ...r, estado: action.payload.estado } : r,
+        ),
+        notificaciones: [...action.payload.notificaciones, ...state.notificaciones],
+      }
+    case "pagarReservacion":
+      return {
+        ...state,
+        pagos: [...state.pagos, action.payload.pago],
+        reservaciones: state.reservaciones.map((r) =>
+          r.id === action.payload.id ? { ...r, pagoId: action.payload.pago.id } : r,
+        ),
+        notificaciones: [action.payload.notificacion, ...state.notificaciones],
+      }
+    case "solicitarIntencion":
+      return {
+        ...state,
+        reservaciones: state.reservaciones.map((r) =>
+          r.id === action.payload.id ? { ...r, intencionSolicitada: true } : r,
+        ),
+        notificaciones: [action.payload.notificacion, ...state.notificaciones],
+      }
+    case "enviarIntencion":
+      return {
+        ...state,
+        reservaciones: state.reservaciones.map((r) =>
+          r.id === action.payload.id ? { ...r, mensaje: action.payload.mensaje } : r,
+        ),
+      }
+    case "solicitarComentario":
+      return {
+        ...state,
+        reservaciones: state.reservaciones.map((r) =>
+          r.id === action.payload.id ? { ...r, comentarioSolicitado: true } : r,
+        ),
+        notificaciones: [action.payload.notificacion, ...state.notificaciones],
+      }
+    case "enviarComentario":
+      return {
+        ...state,
+        reservaciones: state.reservaciones.map((r) =>
+          r.id === action.payload.id
+            ? { ...r, comentarioCliente: action.payload.comentario }
+            : r,
+        ),
+      }
+    case "suspenderUsuario":
+      return {
+        ...state,
+        usuarios: state.usuarios.map((u) =>
+          u.id === action.payload.id ? { ...u, estado: "suspendido" } : u,
+        ),
+      }
+    case "reactivarUsuario":
+      return {
+        ...state,
+        usuarios: state.usuarios.map((u) =>
+          u.id === action.payload.id ? { ...u, estado: "activo" } : u,
+        ),
+      }
+    case "resolverVerificacion":
+      return {
+        ...state,
+        usuarios: state.usuarios.map((u) =>
+          u.id === action.payload.id
+            ? { ...u, verificacion: action.payload.estado }
+            : u,
+        ),
+        notificaciones: [action.payload.notificacion, ...state.notificaciones],
+      }
+    case "marcarLeida":
+      return {
+        ...state,
+        notificaciones: state.notificaciones.map((n) =>
+          n.id === action.payload.id ? { ...n, leida: true } : n,
+        ),
+      }
+    case "marcarTodasLeidas":
+      return {
+        ...state,
+        notificaciones: state.notificaciones.map((n) =>
+          n.usuarioId === action.payload.usuarioId ? { ...n, leida: true } : n,
+        ),
+      }
+    default:
+      return state
+  }
 }
 
 export function diasEntre(inicio: string, fin: string) {
@@ -127,28 +369,20 @@ function traslapa(aI: string, aF: string, bI: string, bF: string) {
 }
 
 export function StoreProvider({ children }: { children: React.ReactNode }) {
-  const [db, setDb] = useState<DBShape>(seed)
+  const [db, dispatch] = useReducer(reducer, undefined, seed)
   const [hydrated, setHydrated] = useState(false)
 
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY)
-      if (raw) {
-        setDb(JSON.parse(raw))
-      }
-    } catch {
-      // ignore
+    const persisted = readStorage()
+    if (persisted) {
+      dispatch({ type: "hydrate", payload: persisted })
     }
     setHydrated(true)
   }, [])
 
   useEffect(() => {
     if (!hydrated) return
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(db))
-    } catch {
-      // ignore
-    }
+    writeStorage(db)
   }, [db, hydrated])
 
   const usuarioActual = useMemo(
@@ -164,10 +398,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       ignorarReservacionId?: string,
     ) => {
       const espacio = db.espacios.find((e) => e.id === espacioId)
-      if (!espacio) return false
-      if (inicio > fin) return false
-      for (const b of espacio.bloqueos) {
-        if (traslapa(inicio, fin, b.inicio, b.fin)) return false
+      if (!espacio || inicio > fin) return false
+      for (const bloqueo of espacio.bloqueos) {
+        if (traslapa(inicio, fin, bloqueo.inicio, bloqueo.fin)) return false
       }
       const aprobadas = db.reservaciones.filter(
         (r) =>
@@ -175,8 +408,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           r.estado === "aprobada" &&
           r.id !== ignorarReservacionId,
       )
-      for (const r of aprobadas) {
-        if (traslapa(inicio, fin, r.inicio, r.fin)) return false
+      for (const reservacion of aprobadas) {
+        if (traslapa(inicio, fin, reservacion.inicio, reservacion.fin)) return false
       }
       return true
     },
@@ -184,310 +417,229 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   )
 
   const registrar: Store["registrar"] = useCallback((data) => {
-    let result: Resultado = { ok: true }
-    setDb((prev) => {
-      const existe = prev.usuarios.some(
-        (u) => u.correo.toLowerCase() === data.correo.toLowerCase(),
-      )
-      if (existe) {
-        result = { ok: false, error: "Ya existe una cuenta con este correo." }
-        return prev
-      }
-      const nuevo: Usuario = {
-        ...data,
-        id: uid("u"),
-        estado: "activo",
-        verificacion: "no_enviada",
-      }
-      result = { ok: true, id: nuevo.id }
-      return {
-        ...prev,
-        usuarios: [...prev.usuarios, nuevo],
-        sesionId: nuevo.id,
-      }
-    })
-    return result
-  }, [])
+    const existe = db.usuarios.some(
+      (u) => u.correo.toLowerCase() === data.correo.toLowerCase(),
+    )
+    if (existe) {
+      return { ok: false, error: "Ya existe una cuenta con este correo." }
+    }
+    const usuario: Usuario = {
+      ...data,
+      id: uid("u"),
+      estado: "activo",
+      verificacion: "no_enviada",
+    }
+    dispatch({ type: "registrar", payload: { usuario } })
+    return { ok: true, id: usuario.id }
+  }, [db.usuarios])
 
   const iniciarSesion: Store["iniciarSesion"] = useCallback(
     (correo, password) => {
-      let result: Resultado = { ok: true }
-      setDb((prev) => {
-        const u = prev.usuarios.find(
-          (x) => x.correo.toLowerCase() === correo.toLowerCase(),
-        )
-        if (!u || u.password !== password) {
-          result = { ok: false, error: "Correo o contraseña incorrectos." }
-          return prev
-        }
-        if (u.estado === "suspendido") {
-          result = { ok: false, error: "Tu cuenta está suspendida." }
-          return prev
-        }
-        result = { ok: true, id: u.id }
-        return { ...prev, sesionId: u.id }
-      })
-      return result
+      const usuario = db.usuarios.find(
+        (u) => u.correo.toLowerCase() === correo.toLowerCase(),
+      )
+      if (!usuario || usuario.password !== password) {
+        return { ok: false, error: "Correo o contraseña incorrectos." }
+      }
+      if (usuario.estado === "suspendido") {
+        return { ok: false, error: "Tu cuenta está suspendida." }
+      }
+      dispatch({ type: "iniciarSesion", payload: { sesionId: usuario.id } })
+      return { ok: true, id: usuario.id }
     },
-    [],
+    [db.usuarios],
   )
 
   const cerrarSesion = useCallback(() => {
-    setDb((prev) => ({ ...prev, sesionId: null }))
+    dispatch({ type: "cerrarSesion" })
   }, [])
 
-  const recuperar: Store["recuperar"] = useCallback((correo) => {
-    const existe = db.usuarios.some(
-      (u) => u.correo.toLowerCase() === correo.toLowerCase(),
-    )
-    if (!existe) {
-      return { ok: false, error: "No encontramos una cuenta con ese correo." }
-    }
-    return { ok: true }
-  }, [db.usuarios])
-
-  const actualizarPerfil: Store["actualizarPerfil"] = useCallback((data) => {
-    setDb((prev) => {
-      if (!prev.sesionId) return prev
-      return {
-        ...prev,
-        usuarios: prev.usuarios.map((u) =>
-          u.id === prev.sesionId ? { ...u, ...data } : u,
-        ),
+  const recuperar: Store["recuperar"] = useCallback(
+    (correo) => {
+      const existe = db.usuarios.some(
+        (u) => u.correo.toLowerCase() === correo.toLowerCase(),
+      )
+      if (!existe) {
+        return { ok: false, error: "No encontramos una cuenta con ese correo." }
       }
-    })
-  }, [])
+      return { ok: true }
+    },
+    [db.usuarios],
+  )
+
+  const actualizarPerfil: Store["actualizarPerfil"] = useCallback(
+    (data) => {
+      if (!db.sesionId) return
+      dispatch({
+        type: "actualizarPerfil",
+        payload: { sesionId: db.sesionId, data },
+      })
+    },
+    [db.sesionId],
+  )
 
   const enviarVerificacion: Store["enviarVerificacion"] = useCallback(
     (documento) => {
-      setDb((prev) => {
-        if (!prev.sesionId) return prev
-        return {
-          ...prev,
-          usuarios: prev.usuarios.map((u) =>
-            u.id === prev.sesionId
-              ? { ...u, verificacion: "pendiente" as EstadoVerificacion, documento }
-              : u,
-          ),
-        }
+      if (!db.sesionId) return
+      dispatch({
+        type: "enviarVerificacion",
+        payload: { sesionId: db.sesionId, documento },
       })
     },
-    [],
+    [db.sesionId],
   )
 
-  const publicarEspacio: Store["publicarEspacio"] = useCallback((data) => {
-    let result: Resultado = { ok: true }
-    setDb((prev) => {
-      if (!prev.sesionId) {
-        result = { ok: false, error: "Sesión no válida." }
-        return prev
+  const publicarEspacio: Store["publicarEspacio"] = useCallback(
+    (data) => {
+      if (!db.sesionId) {
+        return { ok: false, error: "Sesión no válida." }
       }
-      const nuevo: Espacio = {
+      const espacio: Espacio = {
         ...data,
         id: uid("e"),
-        propietarioId: prev.sesionId,
+        propietarioId: db.sesionId,
         estado: "activo",
         bloqueos: [],
         creado: hoy(),
       }
-      result = { ok: true, id: nuevo.id }
-      return { ...prev, espacios: [...prev.espacios, nuevo] }
-    })
-    return result
+      dispatch({ type: "publicarEspacio", payload: { espacio } })
+      return { ok: true, id: espacio.id }
+    },
+    [db.sesionId],
+  )
+
+  const actualizarEspacio: Store["actualizarEspacio"] = useCallback((id, data) => {
+    dispatch({ type: "actualizarEspacio", payload: { id, data } })
   }, [])
 
-  const actualizarEspacio: Store["actualizarEspacio"] = useCallback(
-    (id, data) => {
-      setDb((prev) => ({
-        ...prev,
-        espacios: prev.espacios.map((e) =>
-          e.id === id ? { ...e, ...data } : e,
-        ),
-      }))
-    },
-    [],
-  )
+  const alternarEstadoEspacio: Store["alternarEstadoEspacio"] = useCallback((id) => {
+    dispatch({ type: "alternarEstadoEspacio", payload: { id } })
+  }, [])
 
-  const alternarEstadoEspacio: Store["alternarEstadoEspacio"] = useCallback(
-    (id) => {
-      setDb((prev) => ({
-        ...prev,
-        espacios: prev.espacios.map((e) =>
-          e.id === id
-            ? { ...e, estado: e.estado === "activo" ? "inactivo" : "activo" }
-            : e,
-        ),
-      }))
-    },
-    [],
-  )
+  const bloquearFechas: Store["bloquearFechas"] = useCallback((espacioId, inicio, fin) => {
+    if (!inicio || !fin) {
+      return { ok: false, error: "Selecciona ambas fechas." }
+    }
+    if (inicio > fin) {
+      return {
+        ok: false,
+        error: "La fecha de inicio no puede ser posterior a la fecha fin.",
+      }
+    }
+    dispatch({
+      type: "bloquearFechas",
+      payload: { espacioId, bloqueo: { id: uid("b"), inicio, fin } },
+    })
+    return { ok: true }
+  }, [])
 
-  const bloquearFechas: Store["bloquearFechas"] = useCallback(
-    (espacioId, inicio, fin) => {
-      if (!inicio || !fin) return { ok: false, error: "Selecciona ambas fechas." }
-      if (inicio > fin)
-        return { ok: false, error: "La fecha de inicio no puede ser posterior a la fecha fin." }
-      setDb((prev) => ({
-        ...prev,
-        espacios: prev.espacios.map((e) =>
-          e.id === espacioId
-            ? {
-                ...e,
-                bloqueos: [...e.bloqueos, { id: uid("b"), inicio, fin }],
-              }
-            : e,
-        ),
-      }))
-      return { ok: true }
-    },
-    [],
-  )
-
-  const eliminarBloqueo: Store["eliminarBloqueo"] = useCallback(
-    (espacioId, bloqueoId) => {
-      setDb((prev) => ({
-        ...prev,
-        espacios: prev.espacios.map((e) =>
-          e.id === espacioId
-            ? { ...e, bloqueos: e.bloqueos.filter((b) => b.id !== bloqueoId) }
-            : e,
-        ),
-      }))
-    },
-    [],
-  )
+  const eliminarBloqueo: Store["eliminarBloqueo"] = useCallback((espacioId, bloqueoId) => {
+    dispatch({ type: "eliminarBloqueo", payload: { espacioId, bloqueoId } })
+  }, [])
 
   const solicitarReservacion: Store["solicitarReservacion"] = useCallback(
     (espacioId, inicio, fin, mensaje) => {
-      let result: Resultado = { ok: true }
-      setDb((prev) => {
-        if (!prev.sesionId) {
-          result = { ok: false, error: "Inicia sesión para reservar." }
-          return prev
-        }
-        const espacio = prev.espacios.find((e) => e.id === espacioId)
-        if (!espacio) {
-          result = { ok: false, error: "Espacio no encontrado." }
-          return prev
-        }
-        if (!inicio || !fin) {
-          result = { ok: false, error: "Selecciona las fechas de la reservación." }
-          return prev
-        }
-        if (inicio > fin) {
-          result = { ok: false, error: "La fecha de inicio no puede ser posterior a la fecha fin." }
-          return prev
-        }
-        const intencion = mensaje.trim()
-        if (intencion.length < 10) {
-          result = {
-            ok: false,
-            error: "Describe la intención del evento con al menos 10 caracteres.",
-          }
-          return prev
-        }
-        if (intencion.length > 500) {
-          result = {
-            ok: false,
-            error: "El mensaje no puede superar los 500 caracteres.",
-          }
-          return prev
-        }
-        // disponibilidad
-        for (const b of espacio.bloqueos) {
-          if (traslapa(inicio, fin, b.inicio, b.fin)) {
-            result = { ok: false, error: "No disponible para las fechas seleccionadas." }
-            return prev
-          }
-        }
-        const conflicto = prev.reservaciones.some(
-          (r) =>
-            r.espacioId === espacioId &&
-            r.estado === "aprobada" &&
-            traslapa(inicio, fin, r.inicio, r.fin),
-        )
-        if (conflicto) {
-          result = { ok: false, error: "No disponible para las fechas seleccionadas." }
-          return prev
-        }
-        const dias = diasEntre(inicio, fin)
-        const nueva: Reservacion = {
-          id: uid("r"),
-          espacioId,
-          clienteId: prev.sesionId,
-          inicio,
-          fin,
-          dias,
-          total: dias * espacio.precio,
-          mensaje: intencion,
-          estado: "pendiente",
-          creado: hoy(),
-        }
-        const noti: Notificacion = {
-          id: uid("n"),
-          usuarioId: espacio.propietarioId,
-          mensaje: `Recibiste una nueva solicitud para ${espacio.nombre}.`,
-          tipo: "nueva_solicitud",
-          leida: false,
-          fecha: hoy(),
-        }
-        result = { ok: true, id: nueva.id }
+      if (!db.sesionId) {
+        return { ok: false, error: "Inicia sesión para reservar." }
+      }
+      const espacio = db.espacios.find((e) => e.id === espacioId)
+      if (!espacio) {
+        return { ok: false, error: "Espacio no encontrado." }
+      }
+      if (!inicio || !fin) {
+        return { ok: false, error: "Selecciona las fechas de la reservación." }
+      }
+      if (inicio > fin) {
         return {
-          ...prev,
-          reservaciones: [...prev.reservaciones, nueva],
-          notificaciones: [noti, ...prev.notificaciones],
+          ok: false,
+          error: "La fecha de inicio no puede ser posterior a la fecha fin.",
         }
+      }
+      const intencion = mensaje.trim()
+      if (intencion.length < 10) {
+        return {
+          ok: false,
+          error: "Describe la intención del evento con al menos 10 caracteres.",
+        }
+      }
+      if (intencion.length > 500) {
+        return {
+          ok: false,
+          error: "El mensaje no puede superar los 500 caracteres.",
+        }
+      }
+      if (!espacioDisponible(espacioId, inicio, fin)) {
+        return { ok: false, error: "No disponible para las fechas seleccionadas." }
+      }
+      const reservacion: Reservacion = {
+        id: uid("r"),
+        espacioId,
+        clienteId: db.sesionId,
+        inicio,
+        fin,
+        dias: diasEntre(inicio, fin),
+        total: diasEntre(inicio, fin) * espacio.precio,
+        mensaje: intencion,
+        estado: "pendiente",
+        creado: hoy(),
+      }
+      const notificacion: Notificacion = {
+        id: uid("n"),
+        usuarioId: espacio.propietarioId,
+        mensaje: `Recibiste una nueva solicitud para ${espacio.nombre}.`,
+        tipo: "nueva_solicitud",
+        leida: false,
+        fecha: hoy(),
+      }
+      dispatch({
+        type: "solicitarReservacion",
+        payload: { reservacion, notificacion },
       })
-      return result
+      return { ok: true, id: reservacion.id }
     },
-    [],
+    [db.espacios, db.sesionId, espacioDisponible],
   )
 
   const cambiarEstadoReservacion = useCallback(
     (id: string, estado: Reservacion["estado"]) => {
-      setDb((prev) => {
-        const reserva = prev.reservaciones.find((r) => r.id === id)
-        if (!reserva) return prev
-        const espacio = prev.espacios.find((e) => e.id === reserva.espacioId)
-        const notis: Notificacion[] = []
-        if (estado === "aprobada") {
-          notis.push({
-            id: uid("n"),
-            usuarioId: reserva.clienteId,
-            mensaje: `Tu reservación de ${espacio?.nombre ?? "espacio"} fue aprobada.`,
-            tipo: "reservacion_aprobada",
-            leida: false,
-            fecha: hoy(),
-          })
-        } else if (estado === "rechazada") {
-          notis.push({
-            id: uid("n"),
-            usuarioId: reserva.clienteId,
-            mensaje: `Tu reservación de ${espacio?.nombre ?? "espacio"} fue rechazada.`,
-            tipo: "reservacion_rechazada",
-            leida: false,
-            fecha: hoy(),
-          })
-        } else if (estado === "cancelada" && espacio) {
-          notis.push({
-            id: uid("n"),
-            usuarioId: espacio.propietarioId,
-            mensaje: `El cliente canceló una reservación de ${espacio.nombre}.`,
-            tipo: "reservacion_cancelada",
-            leida: false,
-            fecha: hoy(),
-          })
-        }
-        return {
-          ...prev,
-          reservaciones: prev.reservaciones.map((r) =>
-            r.id === id ? { ...r, estado } : r,
-          ),
-          notificaciones: [...notis, ...prev.notificaciones],
-        }
+      const reserva = db.reservaciones.find((r) => r.id === id)
+      if (!reserva) return
+      const espacio = db.espacios.find((e) => e.id === reserva.espacioId)
+      const notificaciones: Notificacion[] = []
+      if (estado === "aprobada") {
+        notificaciones.push({
+          id: uid("n"),
+          usuarioId: reserva.clienteId,
+          mensaje: `Tu reservación de ${espacio?.nombre ?? "espacio"} fue aprobada.`,
+          tipo: "reservacion_aprobada",
+          leida: false,
+          fecha: hoy(),
+        })
+      } else if (estado === "rechazada") {
+        notificaciones.push({
+          id: uid("n"),
+          usuarioId: reserva.clienteId,
+          mensaje: `Tu reservación de ${espacio?.nombre ?? "espacio"} fue rechazada.`,
+          tipo: "reservacion_rechazada",
+          leida: false,
+          fecha: hoy(),
+        })
+      } else if (estado === "cancelada" && espacio) {
+        notificaciones.push({
+          id: uid("n"),
+          usuarioId: espacio.propietarioId,
+          mensaje: `El cliente canceló una reservación de ${espacio.nombre}.`,
+          tipo: "reservacion_cancelada",
+          leida: false,
+          fecha: hoy(),
+        })
+      }
+      dispatch({
+        type: "cambiarEstadoReservacion",
+        payload: { id, estado, notificaciones },
       })
     },
-    [],
+    [db.espacios, db.reservaciones],
   )
 
   const aprobarReservacion = useCallback(
@@ -503,21 +655,17 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     [cambiarEstadoReservacion],
   )
 
-  const pagarReservacion: Store["pagarReservacion"] = useCallback((id) => {
-    let result: Resultado = { ok: true }
-    setDb((prev) => {
-      const reserva = prev.reservaciones.find((r) => r.id === id)
+  const pagarReservacion: Store["pagarReservacion"] = useCallback(
+    (id) => {
+      const reserva = db.reservaciones.find((r) => r.id === id)
       if (!reserva) {
-        result = { ok: false, error: "Reservación no encontrada." }
-        return prev
+        return { ok: false, error: "Reservación no encontrada." }
       }
       if (reserva.estado !== "aprobada") {
-        result = { ok: false, error: "Solo puedes pagar reservaciones aprobadas." }
-        return prev
+        return { ok: false, error: "Solo puedes pagar reservaciones aprobadas." }
       }
       if (reserva.pagoId) {
-        result = { ok: false, error: "Esta reservación ya fue pagada." }
-        return prev
+        return { ok: false, error: "Esta reservación ya fue pagada." }
       }
       const pago: Pago = {
         id: uid("p"),
@@ -526,7 +674,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         estado: "pagado",
         fecha: hoy(),
       }
-      const noti: Notificacion = {
+      const notificacion: Notificacion = {
         id: uid("n"),
         usuarioId: reserva.clienteId,
         mensaje: `Tu pago de $${reserva.total.toLocaleString("es-MX")} fue registrado correctamente.`,
@@ -534,285 +682,256 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         leida: false,
         fecha: hoy(),
       }
-      result = { ok: true, id: pago.id }
-      return {
-        ...prev,
-        pagos: [...prev.pagos, pago],
-        reservaciones: prev.reservaciones.map((r) =>
-          r.id === id ? { ...r, pagoId: pago.id } : r,
-        ),
-        notificaciones: [noti, ...prev.notificaciones],
-      }
-    })
-    return result
-  }, [])
+      dispatch({
+        type: "pagarReservacion",
+        payload: { id, pago, notificacion },
+      })
+      return { ok: true, id: pago.id }
+    },
+    [db.reservaciones],
+  )
 
   const solicitarIntencion: Store["solicitarIntencion"] = useCallback(
     (id) => {
-      let result: Resultado = { ok: true }
-      setDb((prev) => {
-        const reserva = prev.reservaciones.find((r) => r.id === id)
-        const espacio = reserva
-          ? prev.espacios.find((e) => e.id === reserva.espacioId)
-          : undefined
-        if (!reserva || !espacio) {
-          result = { ok: false, error: "Reservación no encontrada." }
-          return prev
-        }
-        if (espacio.propietarioId !== usuarioActual?.id) {
-          result = { ok: false, error: "No puedes modificar esta reservación." }
-          return prev
-        }
-        if (reserva.mensaje?.trim()) {
-          result = { ok: false, error: "El cliente ya agregó la intención del evento." }
-          return prev
-        }
-        if (reserva.intencionSolicitada) {
-          result = { ok: false, error: "Ya solicitaste la intención del evento." }
-          return prev
-        }
-        const notificacion: Notificacion = {
-          id: uid("n"),
-          usuarioId: reserva.clienteId,
-          mensaje: `El propietario de ${espacio.nombre} te pidió agregar la intención de tu evento.`,
-          tipo: "intencion_solicitada",
-          leida: false,
-          fecha: hoy(),
-        }
-        return {
-          ...prev,
-          reservaciones: prev.reservaciones.map((r) =>
-            r.id === id ? { ...r, intencionSolicitada: true } : r,
-          ),
-          notificaciones: [notificacion, ...prev.notificaciones],
-        }
-      })
-      return result
+      const reserva = db.reservaciones.find((r) => r.id === id)
+      const espacio = reserva
+        ? db.espacios.find((e) => e.id === reserva.espacioId)
+        : undefined
+      if (!reserva || !espacio) {
+        return { ok: false, error: "Reservación no encontrada." }
+      }
+      if (espacio.propietarioId !== usuarioActual?.id) {
+        return { ok: false, error: "No puedes modificar esta reservación." }
+      }
+      if (reserva.mensaje?.trim()) {
+        return { ok: false, error: "El cliente ya agregó la intención del evento." }
+      }
+      if (reserva.intencionSolicitada) {
+        return { ok: false, error: "Ya solicitaste la intención del evento." }
+      }
+      const notificacion: Notificacion = {
+        id: uid("n"),
+        usuarioId: reserva.clienteId,
+        mensaje: `El propietario de ${espacio.nombre} te pidió agregar la intención de tu evento.`,
+        tipo: "intencion_solicitada",
+        leida: false,
+        fecha: hoy(),
+      }
+      dispatch({ type: "solicitarIntencion", payload: { id, notificacion } })
+      return { ok: true }
     },
-    [usuarioActual],
+    [db.espacios, db.reservaciones, usuarioActual?.id],
   )
 
   const enviarIntencion: Store["enviarIntencion"] = useCallback(
     (id, mensaje) => {
-      let result: Resultado = { ok: true }
-      setDb((prev) => {
-        const reserva = prev.reservaciones.find((r) => r.id === id)
-        if (!reserva) {
-          result = { ok: false, error: "Reservación no encontrada." }
-          return prev
-        }
-        if (reserva.clienteId !== usuarioActual?.id) {
-          result = { ok: false, error: "No puedes editar esta reservación." }
-          return prev
-        }
-        if (!reserva.intencionSolicitada) {
-          result = { ok: false, error: "El propietario no ha solicitado este mensaje." }
-          return prev
-        }
-        if (reserva.mensaje?.trim()) {
-          result = { ok: false, error: "La intención del evento ya fue agregada." }
-          return prev
-        }
-        const intencion = mensaje.trim()
-        if (intencion.length < 10 || intencion.length > 500) {
-          result = {
-            ok: false,
-            error: "La intención debe tener entre 10 y 500 caracteres.",
-          }
-          return prev
-        }
+      const reserva = db.reservaciones.find((r) => r.id === id)
+      if (!reserva) {
+        return { ok: false, error: "Reservación no encontrada." }
+      }
+      if (reserva.clienteId !== usuarioActual?.id) {
+        return { ok: false, error: "No puedes editar esta reservación." }
+      }
+      if (!reserva.intencionSolicitada) {
+        return { ok: false, error: "El propietario no ha solicitado este mensaje." }
+      }
+      if (reserva.mensaje?.trim()) {
+        return { ok: false, error: "La intención del evento ya fue agregada." }
+      }
+      const intencion = mensaje.trim()
+      if (intencion.length < 10 || intencion.length > 500) {
         return {
-          ...prev,
-          reservaciones: prev.reservaciones.map((r) =>
-            r.id === id ? { ...r, mensaje: intencion } : r,
-          ),
+          ok: false,
+          error: "La intención debe tener entre 10 y 500 caracteres.",
         }
-      })
-      return result
+      }
+      dispatch({ type: "enviarIntencion", payload: { id, mensaje: intencion } })
+      return { ok: true }
     },
-    [usuarioActual],
+    [db.reservaciones, usuarioActual?.id],
   )
 
   const solicitarComentario: Store["solicitarComentario"] = useCallback(
     (id) => {
-      let result: Resultado = { ok: true }
-      setDb((prev) => {
-        const reserva = prev.reservaciones.find((r) => r.id === id)
-        const espacio = reserva
-          ? prev.espacios.find((e) => e.id === reserva.espacioId)
-          : undefined
-        if (!reserva || !espacio) {
-          result = { ok: false, error: "Reservación no encontrada." }
-          return prev
-        }
-        if (espacio.propietarioId !== usuarioActual?.id) {
-          result = { ok: false, error: "No puedes modificar esta reservación." }
-          return prev
-        }
-        if (reserva.estado !== "aprobada") {
-          result = { ok: false, error: "Solo puedes solicitar comentarios en reservaciones aprobadas." }
-          return prev
-        }
-        if (reserva.comentarioSolicitado) {
-          result = { ok: false, error: "Ya solicitaste un comentario para esta reservación." }
-          return prev
-        }
-        const noti: Notificacion = {
-          id: uid("n"),
-          usuarioId: reserva.clienteId,
-          mensaje: `El propietario de ${espacio.nombre} te solicitó un comentario sobre tu experiencia.`,
-          tipo: "comentario_solicitado",
-          leida: false,
-          fecha: hoy(),
-        }
+      const reserva = db.reservaciones.find((r) => r.id === id)
+      const espacio = reserva
+        ? db.espacios.find((e) => e.id === reserva.espacioId)
+        : undefined
+      if (!reserva || !espacio) {
+        return { ok: false, error: "Reservación no encontrada." }
+      }
+      if (espacio.propietarioId !== usuarioActual?.id) {
+        return { ok: false, error: "No puedes modificar esta reservación." }
+      }
+      if (reserva.estado !== "aprobada") {
         return {
-          ...prev,
-          reservaciones: prev.reservaciones.map((r) =>
-            r.id === id ? { ...r, comentarioSolicitado: true } : r,
-          ),
-          notificaciones: [noti, ...prev.notificaciones],
+          ok: false,
+          error: "Solo puedes solicitar comentarios en reservaciones aprobadas.",
         }
-      })
-      return result
+      }
+      if (reserva.comentarioSolicitado) {
+        return {
+          ok: false,
+          error: "Ya solicitaste un comentario para esta reservación.",
+        }
+      }
+      const notificacion: Notificacion = {
+        id: uid("n"),
+        usuarioId: reserva.clienteId,
+        mensaje: `El propietario de ${espacio.nombre} te solicitó un comentario sobre tu experiencia.`,
+        tipo: "comentario_solicitado",
+        leida: false,
+        fecha: hoy(),
+      }
+      dispatch({ type: "solicitarComentario", payload: { id, notificacion } })
+      return { ok: true }
     },
-    [usuarioActual],
+    [db.espacios, db.reservaciones, usuarioActual?.id],
   )
 
   const enviarComentario: Store["enviarComentario"] = useCallback(
     (id, comentario) => {
-      let result: Resultado = { ok: true }
-      setDb((prev) => {
-        const reserva = prev.reservaciones.find((r) => r.id === id)
-        if (!reserva) {
-          result = { ok: false, error: "Reservación no encontrada." }
-          return prev
-        }
-        if (reserva.clienteId !== usuarioActual?.id) {
-          result = { ok: false, error: "No puedes comentar esta reservación." }
-          return prev
-        }
-        if (!reserva.comentarioSolicitado) {
-          result = { ok: false, error: "El propietario aún no ha solicitado un comentario." }
-          return prev
-        }
-        if (reserva.comentarioCliente) {
-          result = { ok: false, error: "Ya enviaste un comentario para esta reservación." }
-          return prev
-        }
-        const texto = comentario.trim()
-        if (texto.length < 10 || texto.length > 500) {
-          result = { ok: false, error: "El comentario debe tener entre 10 y 500 caracteres." }
-          return prev
-        }
+      const reserva = db.reservaciones.find((r) => r.id === id)
+      if (!reserva) {
+        return { ok: false, error: "Reservación no encontrada." }
+      }
+      if (reserva.clienteId !== usuarioActual?.id) {
+        return { ok: false, error: "No puedes comentar esta reservación." }
+      }
+      if (!reserva.comentarioSolicitado) {
         return {
-          ...prev,
-          reservaciones: prev.reservaciones.map((r) =>
-            r.id === id ? { ...r, comentarioCliente: texto } : r,
-          ),
+          ok: false,
+          error: "El propietario aún no ha solicitado un comentario.",
         }
-      })
-      return result
+      }
+      if (reserva.comentarioCliente) {
+        return {
+          ok: false,
+          error: "Ya enviaste un comentario para esta reservación.",
+        }
+      }
+      const texto = comentario.trim()
+      if (texto.length < 10 || texto.length > 500) {
+        return {
+          ok: false,
+          error: "El comentario debe tener entre 10 y 500 caracteres.",
+        }
+      }
+      dispatch({ type: "enviarComentario", payload: { id, comentario: texto } })
+      return { ok: true }
     },
-    [usuarioActual],
+    [db.reservaciones, usuarioActual?.id],
   )
 
   const suspenderUsuario = useCallback((id: string) => {
-    setDb((prev) => ({
-      ...prev,
-      usuarios: prev.usuarios.map((u) =>
-        u.id === id ? { ...u, estado: "suspendido" } : u,
-      ),
-    }))
+    dispatch({ type: "suspenderUsuario", payload: { id } })
   }, [])
 
   const reactivarUsuario = useCallback((id: string) => {
-    setDb((prev) => ({
-      ...prev,
-      usuarios: prev.usuarios.map((u) =>
-        u.id === id ? { ...u, estado: "activo" } : u,
-      ),
-    }))
+    dispatch({ type: "reactivarUsuario", payload: { id } })
   }, [])
 
   const resolverVerificacion: Store["resolverVerificacion"] = useCallback(
     (id, estado) => {
-      setDb((prev) => {
-        const noti: Notificacion = {
-          id: uid("n"),
-          usuarioId: id,
-          mensaje:
-            estado === "aprobada"
-              ? "Tu identidad fue verificada correctamente."
-              : "Tu verificación fue rechazada. Vuelve a intentarlo.",
-          tipo: "verificacion",
-          leida: false,
-          fecha: hoy(),
-        }
-        return {
-          ...prev,
-          usuarios: prev.usuarios.map((u) =>
-            u.id === id ? { ...u, verificacion: estado } : u,
-          ),
-          notificaciones: [noti, ...prev.notificaciones],
-        }
+      const notificacion: Notificacion = {
+        id: uid("n"),
+        usuarioId: id,
+        mensaje:
+          estado === "aprobada"
+            ? "Tu identidad fue verificada correctamente."
+            : "Tu verificación fue rechazada. Vuelve a intentarlo.",
+        tipo: "verificacion",
+        leida: false,
+        fecha: hoy(),
+      }
+      dispatch({
+        type: "resolverVerificacion",
+        payload: { id, estado, notificacion },
       })
     },
     [],
   )
 
   const marcarLeida = useCallback((id: string) => {
-    setDb((prev) => ({
-      ...prev,
-      notificaciones: prev.notificaciones.map((n) =>
-        n.id === id ? { ...n, leida: true } : n,
-      ),
-    }))
+    dispatch({ type: "marcarLeida", payload: { id } })
   }, [])
 
   const marcarTodasLeidas = useCallback((usuarioId: string) => {
-    setDb((prev) => ({
-      ...prev,
-      notificaciones: prev.notificaciones.map((n) =>
-        n.usuarioId === usuarioId ? { ...n, leida: true } : n,
-      ),
-    }))
+    dispatch({ type: "marcarTodasLeidas", payload: { usuarioId } })
   }, [])
 
-  const value: Store = {
-    hydrated,
-    usuarioActual,
-    usuarios: db.usuarios,
-    espacios: db.espacios,
-    reservaciones: db.reservaciones,
-    pagos: db.pagos,
-    notificaciones: db.notificaciones,
-    registrar,
-    iniciarSesion,
-    cerrarSesion,
-    recuperar,
-    actualizarPerfil,
-    enviarVerificacion,
-    publicarEspacio,
-    actualizarEspacio,
-    alternarEstadoEspacio,
-    bloquearFechas,
-    eliminarBloqueo,
-    solicitarReservacion,
-    aprobarReservacion,
-    rechazarReservacion,
-    cancelarReservacion,
-    pagarReservacion,
-    solicitarIntencion,
-    enviarIntencion,
-    solicitarComentario,
-    enviarComentario,
-    suspenderUsuario,
-    reactivarUsuario,
-    resolverVerificacion,
-    marcarLeida,
-    marcarTodasLeidas,
-    espacioDisponible,
-  }
+  const value = useMemo<Store>(
+    () => ({
+      hydrated,
+      usuarioActual,
+      usuarios: db.usuarios,
+      espacios: db.espacios,
+      reservaciones: db.reservaciones,
+      pagos: db.pagos,
+      notificaciones: db.notificaciones,
+      registrar,
+      iniciarSesion,
+      cerrarSesion,
+      recuperar,
+      actualizarPerfil,
+      enviarVerificacion,
+      publicarEspacio,
+      actualizarEspacio,
+      alternarEstadoEspacio,
+      bloquearFechas,
+      eliminarBloqueo,
+      solicitarReservacion,
+      aprobarReservacion,
+      rechazarReservacion,
+      cancelarReservacion,
+      pagarReservacion,
+      solicitarIntencion,
+      enviarIntencion,
+      solicitarComentario,
+      enviarComentario,
+      suspenderUsuario,
+      reactivarUsuario,
+      resolverVerificacion,
+      marcarLeida,
+      marcarTodasLeidas,
+      espacioDisponible,
+    }),
+    [
+      hydrated,
+      usuarioActual,
+      db.usuarios,
+      db.espacios,
+      db.reservaciones,
+      db.pagos,
+      db.notificaciones,
+      registrar,
+      iniciarSesion,
+      cerrarSesion,
+      recuperar,
+      actualizarPerfil,
+      enviarVerificacion,
+      publicarEspacio,
+      actualizarEspacio,
+      alternarEstadoEspacio,
+      bloquearFechas,
+      eliminarBloqueo,
+      solicitarReservacion,
+      aprobarReservacion,
+      rechazarReservacion,
+      cancelarReservacion,
+      pagarReservacion,
+      solicitarIntencion,
+      enviarIntencion,
+      solicitarComentario,
+      enviarComentario,
+      suspenderUsuario,
+      reactivarUsuario,
+      resolverVerificacion,
+      marcarLeida,
+      marcarTodasLeidas,
+      espacioDisponible,
+    ],
+  )
 
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>
 }
@@ -828,3 +947,4 @@ export function useRol(rol?: Rol) {
   if (!rol) return usuarioActual
   return usuarioActual?.rol === rol ? usuarioActual : null
 }
+
