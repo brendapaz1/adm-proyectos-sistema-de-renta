@@ -1,7 +1,7 @@
 "use client"
 
 import Link from "next/link"
-import { useRouter } from "next/navigation"
+import { useRouter, useSearchParams } from "next/navigation"
 import { useState } from "react"
 import { toast } from "sonner"
 
@@ -26,6 +26,7 @@ const DESTINO: Record<Rol, string> = {
 export default function LoginPage() {
   const { iniciarSesion, usuarios } = useStore()
   const router = useRouter()
+  const searchParams = useSearchParams()
   const [correo, setCorreo] = useState("")
   const [password, setPassword] = useState("")
   const [error, setError] = useState<string | null>(null)
@@ -45,8 +46,9 @@ export default function LoginPage() {
     const user = usuarios.find(
       (u) => u.correo.toLowerCase() === correo.toLowerCase(),
     )
+    const next = searchParams.get("next")
     toast.success("Sesión iniciada correctamente.")
-    router.push(user ? DESTINO[user.rol] : "/")
+    router.push(next || (user ? DESTINO[user.rol] : "/"))
   }
 
   return (
